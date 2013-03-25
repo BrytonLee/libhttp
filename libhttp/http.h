@@ -82,11 +82,13 @@ struct head_field{
 	int		valid;			/* 当前头域存在时为1, 不存在时为0 */
 	http_head_field	hfd;
 	void	*value; /* 当内容存在时指向的是值的开头 */
+	/* 存放私有数据的指针 */
 	void	*pri;
 };
 
 
 struct http_client {
+	struct list node;
 	struct head_field fields[Head_All];
 	struct pool_entry *mem;
 	http_protocol client_http_protocol;
@@ -99,12 +101,18 @@ struct http_client {
 	 */
 	void	*content;
 	int		content_fst_size;
+	int		sockfd;
+	int		keepalive;
+	/* 标记http_client是否正在处理当中 */
+	int		inprocess;
 };
 	
 #define  HTTP_MAX_HEAD_LEN 4095
 #define  CRLF "\x0d\x0a"
+#define  HTTP_CLIENT_MAX_FREE  1024 
 
-struct http_client *http_parse(struct pool_entry *data);
-int http_free(struct http_client *client);
+int http_client_parse(struct http_client * client);
 char * http_search_field(struct http_client *client, http_head_field field);
+struct http_client *http_client_get(int sockfd);
+void http_client_put(struct http_client *client);
 #endif 

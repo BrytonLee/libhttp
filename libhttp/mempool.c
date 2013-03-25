@@ -274,7 +274,6 @@ newentry:
 
 	*pentry = tmp;
 	entry_get(*pentry);
-	(*pentry)->inuse_size = size;
 	current = &tmp->node;
 	ret = 0;
 	return ret;

@@ -1,9 +1,9 @@
 DEBUG = -g
 CFLAGS = $(DEBUG)
-OBJ = libhttp/mempool.o libhttp/http.o
+OBJ = libhttp/mempool.o libhttp/http.o process.o worker.o main.o
 
 all: $(OBJ)
-	gcc -o http $(CFLAGS) http_test.c $(OBJ) 
+	gcc -o httpd $(CFLAGS) $(OBJ) 
 
 clean:
-	rm http $(OBJ)
+	rm httpd $(OBJ)
