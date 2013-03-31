@@ -186,7 +186,8 @@ static void worker(int sv)
 				client = http_client_get(evs[i].data.fd);
 				if ( !client->inprocess ) {
 					/* 不应该会执行到此处 */
-					printf("client->inprocess equal 0\n");
+					fprintf(stderr, "WRITE: client->inprocess equal 0 and sockfd equal %d\n",
+							evs[i].data.fd);
 					http_client_put(client);
 					remove_and_close(epfd, evs[i].data.fd, &ev);
 					continue;
@@ -201,8 +202,14 @@ static void worker(int sv)
 				if ( evs[i].data.fd == sv ) {
 					perror("sv error:");
 					exit(0);
-				} else
+				} else {
+					fprintf(stderr, "error happened on socket: %d\n",
+							evs[i].data.fd);
+					client = http_client_get(evs[i].data.fd);
+					if ( client )
+						http_client_put(client);
 					remove_and_close(epfd, evs[i].data.fd, &ev);
+				}
 			}
 		} /* for (i = 0; i < nfds; i++) */
 	} /* while ( 1 ) */

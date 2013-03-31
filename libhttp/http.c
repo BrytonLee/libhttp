@@ -7,7 +7,7 @@ static int hc_size = 0,  hc_free = 0;
 
 static int http_client_free(struct http_client *client);
 
-static __inline__ void http_client_rest(struct http_client *client)
+static __inline__ void http_client_reset(struct http_client *client)
 {
 	struct pool_entry *entry;
 	
@@ -23,6 +23,7 @@ static __inline__ void http_client_rest(struct http_client *client)
 static struct http_client * http_client_new(int sockfd, int mem_size)
 {
 	struct http_client * client = NULL;
+	struct list *node = NULL;
 	int ret;
 
 	if ( mem_size < 0)
@@ -38,14 +39,15 @@ static struct http_client * http_client_new(int sockfd, int mem_size)
 		http_client_free(client);
 		return client;
 	}
-	client->node.pre = client->node.next = NULL;
-	client->node.data = client;
+	node = &client->node;
+	node->pre = node->next = NULL;
+	node->data = client;
 	if ( !hc_size ) {
-		hc_head = hc_tail = &client->node;
+		hc_head = hc_tail = node;
 	} else { 
-		hc_tail->next = &client->node;
-		client->node.pre = hc_tail;
-		hc_tail = &client->node;
+		hc_tail->next = node;
+		node->pre = hc_tail;
+		hc_tail = node;
 	}
 	client->sockfd = sockfd;
 	client->inprocess = client->keepalive = 0;
@@ -419,6 +421,7 @@ static int client_head_field(struct http_client *client)
 	}
 }
 
+#if 0 
 static int __http_client_parse(struct http_client *client)
 {
 	char *value;
@@ -440,10 +443,30 @@ static int __http_client_parse(struct http_client *client)
 	ret = 0;
 	return ret;
 }
+#endif
 
 int http_client_parse(struct http_client * client)
 {
+	char *value;
+	int ret = -1;
 
+	if ( NULL == client || NULL == client->mem )
+		return ret;
+
+	if ( client_basic_info(client) )
+		return ret;
+	if ( client_head_field(client) )
+		return ret;
+
+	/* keep-alive */
+	if ( (value = http_search_field(client, Connection)) ) {
+		if ( !(strncmp(value, "keep-alive", 10 )) )
+			client->keepalive = 1;
+	}
+	ret = 0;
+	return ret;
+
+#if 0 
 	if ( NULL == client )
 		return -1;
 
@@ -452,6 +475,7 @@ int http_client_parse(struct http_client * client)
 		return -1;
 	}
 	return 0;
+#endif 
 }
 
 
@@ -465,26 +489,52 @@ char * http_search_field(struct http_client *client, http_head_field field)
 	return NULL;
 }
 
+//#define HTTP_CLIENT_DEBUG
+#ifdef HTTP_CLIENT_DEBUG
+static __inline__ void http_client_dump()
+{
+	struct http_client *tmp;
+	struct list *node = hc_head;
+	int i;
+
+	fprintf(stderr, "hc_size: %d, hc_free: %d\nhc_head: %p, hc_tail: %p\n", 
+			hc_size, hc_free, hc_head, hc_tail);
+	for ( i = 0; i < hc_size; i++ ) {
+		tmp = (struct http_client *)node->data;
+		fprintf(stderr, "#%d sockfd: %d, inprocess: %d\n", 
+				i+1, tmp->sockfd, tmp->inprocess);
+		node=node->next;
+	}
+}
+#else 
+#define http_client_dump()
+#endif
+
 /* 通过socket文件描述符取得http client实例.
  * NULL: 失败，没有找到;否则表示成功。*/
 struct http_client *http_client_get(int sockfd)
 {
-	struct list *tmp;
-	struct http_client *client;
+	struct list *tmp = NULL;
+	struct http_client *client = NULL;
 	int inuse;
 
 	if ( sockfd < 0 ) 
 		return NULL;
 
-	/* debug */
-	//printf("call %s\n", __func__);
+	http_client_dump();
+	
+	if ( !hc_size )
+		goto newclient;
 
 	tmp = hc_tail;
-	for ( inuse = hc_size - hc_free; inuse > 0; inuse--, tmp=hc_tail->pre) {
+	for ( inuse = hc_size - hc_free; inuse > 0; inuse--) {
 		client = tmp->data;
 		if ( client->sockfd == sockfd ) {
+			/* debug */
+			//fprintf(stderr, "%s hit! sockfd: %d\n", __func__, sockfd);
 			return client;
 		}
+		tmp=tmp->pre;
 	}
 
 	if ( hc_free ) {
@@ -492,35 +542,45 @@ struct http_client *http_client_get(int sockfd)
 		if ( hc_size > 1) {
 			hc_head = hc_head->next;
 			hc_head->pre = NULL;
+
 			hc_tail->next = &client->node;
 			client->node.pre = hc_tail;
 			hc_tail = &client->node;
 			hc_tail->next = NULL;
 		}
 		client->sockfd = sockfd;
-	} else {
-		/* 新建一个实例 */
-		client = http_client_new(sockfd, HTTP_MAX_HEAD_LEN +1);
-		if ( NULL == client )
-			return NULL;
-	}
+		client->keepalive = client->inprocess = 0;
+		hc_free--;
+		return client;
+	} 
+
+newclient:
+	/* 新建一个实例 */
+	client = http_client_new(sockfd, HTTP_MAX_HEAD_LEN +1);
+	if ( NULL == client )
+		return NULL;
 	hc_free--;
 	return client;
 }
 
 void http_client_put(struct http_client *client)
 {
-	struct list * pre, *next;
+	struct list *node, *pre, *next;
 
 	if ( NULL == client )
 		return;
 
-	/* debug */
-//	printf("call %s\n", __func__);
+	// debug 
+	http_client_dump();
+	if ( !client->inprocess ) {
+		fprintf(stderr, "%s, hc_size: %d hc_free: %d client->inprocess: %d\n", __func__, 
+				hc_size, hc_free, client->inprocess);
+	}
 
 	if ( hc_free > HTTP_CLIENT_MAX_FREE )
 		http_client_free(client);
 	else {
+#if 0
 		pre = client->node.pre;
 		next = client->node.next;
 		if ( pre ) {
@@ -540,6 +600,32 @@ void http_client_put(struct http_client *client)
 		}
 		
 		http_client_rest(client);
+#endif 
+		node = &client->node;
+		if ( node == hc_head ) {
+			http_client_reset(client);
+		} else if ( node == hc_tail ) {
+			hc_tail = node->pre;
+			hc_tail->next = NULL;
+
+			node->pre = NULL;
+			node->next = hc_head;
+			hc_head->pre = node;
+			hc_head = node;
+			http_client_reset(client);
+		} else {
+			pre = node->pre;
+			next = node->next;
+
+			pre->next = next;
+			next->pre = pre;
+			
+			node->pre = NULL;
+			node->next = hc_head;
+			hc_head->pre = node;
+			hc_head = node;
+			http_client_reset(client);
+		}
 		hc_free++;
 	}	
 }

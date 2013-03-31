@@ -90,6 +90,8 @@ int request_process(struct http_client *client, int epfd, int sockfd, struct epo
 	
 	client->inprocess = 1;
 	entry = client->mem;
+	
+	/* TODO: 不一定能一次把头部全部读取到 */
 	while ( 1 ) {
 		ret = read(sockfd, entry->buff, HTTP_MAX_HEAD_LEN);
 		if ( -1 == ret  && errno == EINTR ) 
