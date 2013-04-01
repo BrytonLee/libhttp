@@ -15,6 +15,7 @@ int main(int argc, char ** argv)
 	struct sockaddr client_addr;
 	int addr_len;
 	int worker;
+	int num_cpu;
 	int i, ret = -1;
 	
 	signal(SIGCHLD, SIG_IGN);
@@ -42,9 +43,16 @@ int main(int argc, char ** argv)
 		return ret;
 	}
 
-	/* TODO: 取得CPU的核数 */
-	worker = 4;
+#if 0
+	num_cpu = sysconf(_SC_NPROCESSORS_CONF);
+	worker = num_cpu == -1 ? 4: num_cpu;
+	//debug 
+	fprintf(stderr, "CPU: %d\n", worker);
 	/* 动态数组, 目前我所知道的是gcc支持 */
+#else
+	worker = 4;
+#endif
+
 	int worker_sv[worker][2];
 	ret = create_worker(worker, worker_sv, listenfd);
 	if ( -1 == ret ) {

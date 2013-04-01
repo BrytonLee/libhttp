@@ -1,11 +1,14 @@
+#define _GNU_SOURCE 
 #include <sys/types.h>
 #include <unistd.h>
+#include <sched.h>
 #include <sys/socket.h>
 #include <errno.h>
 #include <signal.h>
 #include "libhttp/http.h"
 #include "worker.h"
 #include "process.h"
+
 
 /*
  * 发送文件描述符到子进程
@@ -223,6 +226,7 @@ static void worker(int sv)
 int create_worker(int worker_n, int worker_sv[][2], int closefd)
 {
 	pid_t pid[worker_n];
+	cpu_set_t mask;
 	int i,j;
 	int ret = -1;
 
@@ -244,6 +248,16 @@ int create_worker(int worker_n, int worker_sv[][2], int closefd)
 			for (j = i-1; j >= 0; j--) {
 				close(worker_sv[j][1]);
 			}
+
+			/* set worker CPU affinity */
+			/*
+			CPU_ZERO(&mask);
+			CPU_SET(i, &mask);
+			if ( sched_setaffinity(0, sizeof(mask), &mask) == -1) {
+				fprintf(stderr,"Warning: Could not set CPU affinity!\n");
+			}
+			*/
+
 			worker(worker_sv[i][0]);
 		} else if ( pid[i] < 0 ) {
 			perror("fork error: ");
