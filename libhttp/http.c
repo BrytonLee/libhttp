@@ -34,6 +34,7 @@ static struct http_client * http_client_new(int sockfd, int mem_size)
 		fprintf(stderr, "memory allocate failed!\n");
 		return client;
 	}
+	memset(client, '\0', sizeof(struct http_client));
 	ret = mem_pool_entry_get(&client->mem, mem_size);
 	if ( 0 != ret || !client->mem ) {
 		http_client_free(client);

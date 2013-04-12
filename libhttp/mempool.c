@@ -1,4 +1,5 @@
 #include "mempool.h"
+#include <string.h>
 
 static struct list *head, *tail, *current;
 static int mempool_size = 0, mempool_free = 0;
@@ -16,6 +17,8 @@ static struct pool_entry *mem_pool_new_entry(int size)
 	if ( NULL == pentry )
 		return pentry;
 
+	memset(pentry, '\0', sizeof(struct pool_entry));
+
 	/* 4字节对齐 */
 	size_align = (size % 4 > 1) ? ((size + 4 ) / 4) : size;
 	pentry->buff = malloc(size_align);
@@ -24,7 +27,7 @@ static struct pool_entry *mem_pool_new_entry(int size)
 		pentry = NULL;
 		return pentry;
 	}
-
+	
 	pentry->node.pre = pentry->node.next = NULL;
 	pentry->node.data = pentry;
 	pentry->total_size = size_align;

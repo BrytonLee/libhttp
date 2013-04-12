@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <sys/types.h> 
@@ -43,23 +44,23 @@ int main(int argc, char ** argv)
 		return ret;
 	}
 
-#if 0
 	num_cpu = sysconf(_SC_NPROCESSORS_CONF);
-	worker = num_cpu == -1 ? 4: num_cpu;
-	//debug 
-	fprintf(stderr, "CPU: %d\n", worker);
-	/* 动态数组, 目前我所知道的是gcc支持 */
-#else
-	worker = 4;
-#endif
 
-	int worker_sv[worker][2];
+	worker = (num_cpu == -1 ? 4 : num_cpu);
+	int (*worker_sv)[2];
+
+	worker_sv = (int (*)[2])calloc(worker, sizeof(int)*2);
+	if ( NULL == worker_sv ) {
+		fprintf(stderr, "Memory alloc failed!\n");
+		return ret;
+	}
+
 	ret = create_worker(worker, worker_sv, listenfd);
 	if ( -1 == ret ) {
 		close(listenfd);
 		_exit(-1);
 	}
-
+	
 	i = 0;
 	do {
 		memset(&client_addr, '\0', addr_len);
