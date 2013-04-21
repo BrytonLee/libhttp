@@ -9,11 +9,22 @@
 #include <unistd.h>
 #include "worker.h"
 
+#ifdef __HTTP_ACCEPT_LOCK__
+#include <sys/epoll.h>
+#include <sys/mman.h>
+#endif
+
 int main(int argc, char ** argv)
 {
-	int listenfd, sockfd;
 	struct sockaddr_in serv_addr;
+#ifndef __HTTP_ACCEPT_LOCK__ 
+	int listenfd, sockfd;
 	struct sockaddr client_addr;
+#else
+	int	master_epfd, nfd;
+	struct epoll_event ev, evs[20];
+	int j;
+#endif
 	int addr_len;
 	int worker;
 	int num_cpu;
@@ -44,6 +55,25 @@ int main(int argc, char ** argv)
 		return ret;
 	}
 
+#ifdef __HTTP_ACCEPT_LOCK__ 
+	/* 初始化accept锁 */
+	while ( 1 ) {
+		accept_lock = (sem_t *)mmap(NULL, sizeof(sem_t),
+				PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+		if( accept_lock == MAP_FAILED && errno == EINTR )
+			continue;
+		else if ( accept_lock == MAP_FAILED ) {
+			perror("mmap failed: ");
+			exit(-1);
+		}
+		break;
+	}
+	if ( sem_init(accept_lock, 1, 1) == -1 ) {
+		perror("Cannot init accept lock: ");
+		exit(-1);
+	}
+#endif
+
 	num_cpu = sysconf(_SC_NPROCESSORS_CONF);
 
 	worker = (num_cpu == -1 ? 4 : num_cpu);
@@ -61,6 +91,58 @@ int main(int argc, char ** argv)
 		_exit(-1);
 	}
 	
+	/* 改成通过锁的方式，各个子进程分别接受请求，
+	 * UNIX domain socket并不删除，继续保留将来使用。
+	 */
+#ifdef __HTTP_ACCEPT_LOCK__ 
+	while ( 1 ) {
+		master_epfd = epoll_create(10);
+		if ( master_epfd < 0 && errno == EINTR )
+			continue;
+		else if ( master_epfd < 0 ) {
+			perror("epoll_create error: ");
+			exit(-1);
+		}
+		break;
+	}
+
+	for ( i = 0; i < worker; i++ ) {
+		ev.data.fd = worker_sv[i][1];
+		ev.events = EPOLLIN;
+		while ( 1 ) {
+			ret = epoll_ctl(master_epfd, EPOLL_CTL_ADD, worker_sv[i][1], &ev);
+			if ( ret < 0 && errno == EINTR )
+				continue;
+			else if ( ret < 0 ) {
+				perror("epoll_ctl error: ");
+				exit(-1);
+			}
+			break;
+		}
+	}
+
+	while ( 1 ) {
+		while ( 1 ) {
+			nfd = epoll_wait(master_epfd, evs, 20, -1);
+			if ( nfd < 0 && errno == EINTR )
+				continue;
+			else if ( nfd < 0 ) {
+				perror("epoll_wait error: ");
+				exit(-1);
+			}
+			break;
+		}
+
+		for (i = 0; i < nfd; i++) {
+			for (j = 0; j < worker; j++) {
+				if ( evs[i].data.fd == worker_sv[j][i])
+					fprintf(stderr, "worker: #%d can read\n", j);
+			}
+		}
+		/* TODO:目前只做到master进程一直循环不推出 */
+	}
+
+#else
 	i = 0;
 	do {
 		memset(&client_addr, '\0', addr_len);
@@ -89,6 +171,7 @@ int main(int argc, char ** argv)
 			break;
 		}
 	} while ( ++i );
+#endif 
 
 	return 0;
 }

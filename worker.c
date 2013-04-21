@@ -8,7 +8,14 @@
 #include "libhttp/http.h"
 #include "worker.h"
 #include "process.h"
+#ifdef __HTTP_ACCEPT_LOCK__
+#include <semaphore.h>
+#include <string.h>
 
+sem_t	*accept_lock;
+int listenfd;
+int total_sockfd = 0;
+#endif
 
 /*
  * 发送文件描述符到子进程
@@ -96,7 +103,7 @@ int recv_from_master(int rfd)
 	return sockfd;
 }
 
-static __inline__ void remove_and_close(int epfd, int sockfd, struct epoll_event *ev)
+__inline__ void remove_and_close(int epfd, int sockfd, struct epoll_event *ev)
 {
 	int ret;
 
@@ -106,6 +113,9 @@ static __inline__ void remove_and_close(int epfd, int sockfd, struct epoll_event
 	while ( (close(sockfd) < 0))
 		if ( errno == EINTR )
 			continue;
+#ifdef __HTTP_ACCEPT_LOCK__
+	total_sockfd--;
+#endif
 }
 
 /* 
@@ -122,6 +132,11 @@ static void worker(int sv)
 	struct epoll_event ev, evs[20];
 	struct http_client * client = NULL;
 	int rdsize = 0, wrsize= 0, i, ret;
+#ifdef __HTTP_ACCEPT_LOCK__
+	struct sockaddr client_addr;
+	int addr_len;
+	int lstd_on = 0; // 判断listenfd 是否在epoll的开关 
+#endif
 
 
 	if ( sv < 0 ) {
@@ -146,15 +161,104 @@ static void worker(int sv)
 	while ( (ret = epoll_ctl(epfd, EPOLL_CTL_ADD, sv, &ev) ) < 0 )
 		if ( errno == EINTR )
 			continue;
+		else if ( ret < 0 ) {
+			perror("epoll_ctl error: ");
+			exit(-1);
+		}
 
 	while ( 1 ) {
+#ifdef __HTTP_ACCEPT_LOCK__
+		if ( !lstd_on ) {
+			/* 先取到锁，取到了锁的才有机会添加到epoll当中 */
+			if ( total_sockfd ) {
+				while ( 1 ) {
+					ret = sem_trywait(accept_lock);
+					if ( ret < 0 && errno == EINTR )
+						continue;
+					else if ( ret < 0 && errno == EAGAIN )
+						break;
+					else if ( ret < 0) {
+						perror("sem_trywait error: ");
+						exit(-1);
+					}
+					break;
+				}
+			} else {
+				/* 不忙的时候挂sem_wait */
+				while ( 1 ) {
+					ret = sem_wait(accept_lock);
+					if ( ret < 0 && errno == EINTR )
+						continue;
+					else if ( ret < 0 ) {
+						perror("sem_trywait error: ");
+						exit(-1);
+					}
+					break;
+				}
+			}
+
+			if ( ret == 0 ) {
+				/* 取到了锁，添加到epoll */
+				ev.data.fd = listenfd;
+				ev.events = EPOLLIN;
+				while ( (ret = epoll_ctl(epfd, EPOLL_CTL_ADD, listenfd, &ev) ) < 0)
+					if ( errno == EINTR )
+						continue;
+					else 
+						perror("epoll_ctl add listen fd error: ");
+				lstd_on = 1;
+			}
+		}
+#endif			
+
 		while ( ( nfds = epoll_wait(epfd, evs, 20, -1) ) < 0 ) {
 			if ( errno == EINTR )
 				continue;
 		}
 
 		for (i = 0; i < nfds; i++) {
-			if( evs[i].data.fd == sv && evs[i].events & EPOLLIN ) {
+#ifdef __HTTP_ACCEPT_LOCK__
+			if ( evs[i].data.fd == listenfd && evs[i].events & EPOLLIN ) {
+				/* 接收新链接 */
+				addr_len = sizeof(client_addr);
+				memset(&client_addr, '\0', addr_len);
+				while ( 1 ) {
+					sockfd = accept(listenfd, (struct sockaddr *)&client_addr, &addr_len);
+					if ( -1 == sockfd  && errno == EINTR ) 
+						continue;
+					else if ( -1 == sockfd ) {
+						perror("accept error: ");
+					}
+					break;
+				}
+
+				if ( sockfd < 0 )
+					continue;
+
+				while ( ( ret = epoll_ctl(epfd, EPOLL_CTL_DEL, listenfd, &ev) ) < 0)
+					if ( errno == EINTR )
+						continue;
+				lstd_on = 0;
+				/* 解锁 */
+				while ( 1 ) {
+					ret = sem_post(accept_lock);
+					if ( ret < 0 && errno == EINTR )
+						continue;
+					break;
+				}
+
+				ev.data.fd = sockfd;
+				ev.events = EPOLLIN;
+				while ( ( ret = epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &ev) ) < 0 )
+					if ( errno == EINTR )
+						continue;
+					else 
+						perror("epoll_ctl error:");
+				total_sockfd++;
+			} else
+#endif
+			if ( evs[i].data.fd == sv && evs[i].events & EPOLLIN ) {
+#ifndef __HTTP_ACCEPT_LOCK__
 				if ( (sockfd = recv_from_master(sv)) < 0 ) {
 					fprintf(stderr, "recv_from_master error\n");
 					continue;
@@ -166,6 +270,9 @@ static void worker(int sv)
 						continue;
 					else 
 						perror("epoll_ctl error:");
+#else
+				fprintf(stderr, "master socket can read\n");
+#endif
 			} else if ( evs[i].events & EPOLLIN) {
 				client = http_client_get(evs[i].data.fd);
 				if ( !client->inprocess ) {
@@ -244,7 +351,12 @@ int create_worker(int worker_n, int worker_sv[][2], int closefd)
 
 		pid[i] = fork();
 		if ( pid[i] == 0 ) {
+#ifdef __HTTP_ACCEPT_LOCK__ 
+			/* 通过锁的方式互斥接收请求*/
+			closefd = closefd; // make gcc happy.
+#else
 			close(closefd);
+#endif
 			for (j = i-1; j >= 0; j--) {
 				close(worker_sv[j][1]);
 			}

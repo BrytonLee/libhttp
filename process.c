@@ -171,11 +171,8 @@ int response_write_back(struct http_client *client, int epfd, int sockfd, struct
 		ev->events = EPOLLIN;
 		epoll_ctl(epfd, EPOLL_CTL_MOD, sockfd, ev);
 	} else {
-		epoll_ctl(epfd, EPOLL_CTL_DEL, sockfd, ev);
 		http_client_put(client);
-		while ( (close(sockfd)) < 0 )
-			if ( errno == EINTR )
-				continue;
+		remove_and_close(epfd, sockfd, ev);
 	}
 		
 	return ret;
