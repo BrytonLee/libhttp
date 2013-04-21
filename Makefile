@@ -1,6 +1,6 @@
 DEBUG = -g
-#CFLAGS = $(DEBUG) -D__HTTP_ACCEPT_LOCK__ -lpthread
-CFLAGS = $(DEBUG)
+CFLAGS = $(DEBUG) -D__HTTP_ACCEPT_LOCK__ -lpthread
+#CFLAGS = $(DEBUG)
 OBJ = libhttp/mempool.o libhttp/http.o process.o worker.o main.o
 
 all: $(OBJ)

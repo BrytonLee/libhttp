@@ -1,10 +1,12 @@
 #define _GNU_SOURCE 
 #include <sys/types.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sched.h>
 #include <sys/socket.h>
 #include <errno.h>
 #include <signal.h>
+#include <string.h>
 #include "libhttp/http.h"
 #include "worker.h"
 #include "process.h"
@@ -16,6 +18,62 @@ sem_t	*accept_lock;
 int listenfd;
 int total_sockfd = 0;
 #endif
+
+static __inline__ void epoll_set_in(int epfd, int sockfd, struct epoll_event *ev)
+{
+	int ret;
+
+	ev->data.fd = sockfd;
+	ev->events = EPOLLIN;
+
+	while ( (ret = epoll_ctl(epfd, EPOLL_CTL_MOD, sockfd, ev)) < 0 )
+		if ( ret == -1 && errno == EINTR )
+			continue;
+}
+
+static __inline__ void epoll_set_out(int epfd, int sockfd, struct epoll_event *ev)
+{
+	int ret;
+
+	ev->data.fd = sockfd;
+	ev->events = EPOLLOUT;
+
+	while ( (ret = epoll_ctl(epfd, EPOLL_CTL_MOD, sockfd, ev)) < 0 )
+		if ( ret == -1 && errno == EINTR )
+			continue;
+}
+
+static __inline__ void epoll_skfd_del(int epfd, int sockfd, struct epoll_event *ev)
+{
+	int ret;
+	
+	while ( (ret = epoll_ctl(epfd, EPOLL_CTL_DEL, sockfd, ev)) < 0 )
+		if ( errno == EINTR )
+			continue;
+	while ( (close(sockfd) < 0))
+		if ( errno == EINTR )
+			continue;
+#ifdef __HTTP_ACCEPT_LOCK__
+	total_sockfd--;
+#endif
+}
+
+/* 设置套接字非阻塞 */
+int set_fd_nonblock(int sock)
+{
+	int flags;
+	flags = fcntl(sock, F_GETFL, 0);
+	if ( flags < 0 ) {
+		perror("fcntl(F_GETFL) failed!");
+		return -1;
+	}
+
+	if ( fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+		perror("fcntl(F_SETFL) failed!");
+		return -1;
+	}
+	return 0;
+}
 
 /*
  * 发送文件描述符到子进程
@@ -103,21 +161,6 @@ int recv_from_master(int rfd)
 	return sockfd;
 }
 
-__inline__ void remove_and_close(int epfd, int sockfd, struct epoll_event *ev)
-{
-	int ret;
-
-	while ( (ret = epoll_ctl(epfd, EPOLL_CTL_DEL, sockfd, ev)) < 0 )
-		if ( errno == EINTR )
-			continue;
-	while ( (close(sockfd) < 0))
-		if ( errno == EINTR )
-			continue;
-#ifdef __HTTP_ACCEPT_LOCK__
-	total_sockfd--;
-#endif
-}
-
 /* 
  * worker 进程的工作函数，一直工作不退出 
  * 整个工作的核心代码实际上能够成为一个模型，
@@ -144,8 +187,8 @@ static void worker(int sv)
 		exit(-1);
 	}
 
-	signal(SIGUSR1, mem_pool_dump);
-	// signal(SIGTERM, xxx);
+	//signal(SIGUSR1, mem_pool_dump);
+	//signal(SIGTERM, xxx);
 	
 	pid = getpid();
 
@@ -155,14 +198,20 @@ static void worker(int sv)
 		exit(-1);
 	}
 	
+	ret = set_fd_nonblock(sv);	
+	if ( ret < 0) 
+		exit(-1);
+
 	/* 使用默认的LT(level triggered)模式 */
+	memset(&ev, '\0', sizeof(ev));
+	memset(evs, '\0', sizeof(evs));
 	ev.data.fd = sv;
 	ev.events = EPOLLIN;
 	while ( (ret = epoll_ctl(epfd, EPOLL_CTL_ADD, sv, &ev) ) < 0 )
 		if ( errno == EINTR )
 			continue;
-		else if ( ret < 0 ) {
-			perror("epoll_ctl error: ");
+		else {
+			perror("epoll_ctl error");
 			exit(-1);
 		}
 
@@ -263,6 +312,7 @@ static void worker(int sv)
 					fprintf(stderr, "recv_from_master error\n");
 					continue;
 				}
+				set_fd_nonblock(sockfd);
 				ev.data.fd = sockfd;
 				ev.events = EPOLLIN;
 				while ( ( ret = epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &ev) ) < 0 )
@@ -274,39 +324,13 @@ static void worker(int sv)
 				fprintf(stderr, "master socket can read\n");
 #endif
 			} else if ( evs[i].events & EPOLLIN) {
+				/* 读事件 */
 				client = http_client_get(evs[i].data.fd);
-				if ( !client->inprocess ) {
-					/* 新http连接请求 */
-					rdsize = request_process(client, epfd, evs[i].data.fd, &ev);
-					if ( rdsize <= 0 ) {
-						/* 连接被关闭，或socket读出错 */
-						http_client_put(client);
-						remove_and_close(epfd, evs[i].data.fd, &ev);
-					}
-				} else {
-					rdsize = data_process(client, epfd, evs[i].data.fd, &ev);
-					if ( rdsize < 0 ) {
-						/* 连接被关闭，或socket读出错 */
-						http_client_put(client);
-						remove_and_close(epfd, evs[i].data.fd, &ev);
-					}
-				}
+				ret = request_read(client, evs[i].data.fd);
 			} else if ( evs[i].events & EPOLLOUT ) {
-				/* 有socket注册了监听写事件，并且目前socket可写 */
+				/* 写事件 */
 				client = http_client_get(evs[i].data.fd);
-				if ( !client->inprocess ) {
-					/* 不应该会执行到此处 */
-					fprintf(stderr, "WRITE: client->inprocess equal 0 and sockfd equal %d\n",
-							evs[i].data.fd);
-					http_client_put(client);
-					remove_and_close(epfd, evs[i].data.fd, &ev);
-					continue;
-				}
-				wrsize = response_write_back(client, epfd, evs[i].data.fd, &ev);
-				if ( wrsize < 0 ) {
-					http_client_put(client);
-					remove_and_close(epfd, evs[i].data.fd, &ev);
-				}
+				ret = response_write(client, evs[i].data.fd);
 			} else {
 				/* ERROR */
 				if ( evs[i].data.fd == sv ) {
@@ -316,11 +340,25 @@ static void worker(int sv)
 					fprintf(stderr, "error happened on socket: %d\n",
 							evs[i].data.fd);
 					client = http_client_get(evs[i].data.fd);
-					if ( client )
-						http_client_put(client);
-					remove_and_close(epfd, evs[i].data.fd, &ev);
+					ret = -1;
 				}
 			}
+
+			switch ( ret ) {
+				case HTTP_SOCKFD_IN:
+					epoll_set_in(epfd, evs[i].data.fd, &ev);
+					break;
+				case HTTP_SOCKFD_OUT:
+					epoll_set_out(epfd, evs[i].data.fd, &ev);
+					break;
+				case HTTP_SOCKFD_DEL:
+				default :
+					if ( client )
+						http_client_put(client);
+					epoll_skfd_del(epfd, evs[i].data.fd, &ev);
+					break;
+			}
+
 		} /* for (i = 0; i < nfds; i++) */
 	} /* while ( 1 ) */
 }
@@ -361,7 +399,7 @@ int create_worker(int worker_n, int worker_sv[][2], int closefd)
 				close(worker_sv[j][1]);
 			}
 
-#if 1
+#if 0
 			/* set worker CPU affinity */
 			CPU_ZERO(&mask);
 			CPU_SET(i, &mask);

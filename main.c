@@ -31,6 +31,8 @@ int main(int argc, char ** argv)
 	int i, ret = -1;
 	
 	signal(SIGCHLD, SIG_IGN);
+	/* TODO SIGPIPE */
+	// signal(SIGPIPE, SIG_IGN);
 
 	listenfd = socket(AF_INET, SOCK_STREAM, 0);
 	if ( -1 == listenfd ) {

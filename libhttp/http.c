@@ -1,9 +1,37 @@
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <errno.h>
 #include "http.h"
 
 static struct list * hc_head = NULL, *hc_tail=NULL;
 static int hc_size = 0,  hc_free = 0;
+
+static char *method_str[] = {
+	"get",
+	"head",
+	"post",
+	"put",
+	"delete",
+	"trace",
+	"connect",
+	"options"
+};
+
+static char *proto_str[] = {
+	"HTTP/0.9",
+	"HTTP/1.0",
+	"HTTP/1.1"
+};
+
+static char *response_head = "HTTP/1.1 200 OK" CRLF
+		"Content-Type: text/html;charset=UTF-8" CRLF
+		"Content-Length: 93" CRLF
+		"Connection: Keep-Alive" CRLF
+		CRLF;
+
+static char *index_htm="<html><head><title>Comming soon...</title></head>"
+		"<body><h1>Comming soon...</h1></body></html>";
 
 static int http_client_free(struct http_client *client);
 
@@ -16,7 +44,8 @@ static __inline__ void http_client_reset(struct http_client *client)
 	client->content_fst_size = client->inprocess = 0;
 	client->sockfd = -1;
 	client->keepalive = 0;
-	entry = client->mem;
+	client->head_valid = 0;
+	entry = client->inbuff;
 	entry->inuse_size = 0;
 }
 
@@ -35,8 +64,8 @@ static struct http_client * http_client_new(int sockfd, int mem_size)
 		return client;
 	}
 	memset(client, '\0', sizeof(struct http_client));
-	ret = mem_pool_entry_get(&client->mem, mem_size);
-	if ( 0 != ret || !client->mem ) {
+	ret = mem_pool_entry_get(&client->inbuff, mem_size);
+	if ( 0 != ret || !client->inbuff ) {
 		http_client_free(client);
 		return client;
 	}
@@ -78,8 +107,8 @@ static int http_client_free(struct http_client *client)
 	else
 		hc_tail = pre;
 
-	if ( client->mem )
-		mem_pool_entry_put(client->mem);
+	if ( client->inbuff )
+		mem_pool_entry_put(client->inbuff);
 	free(client);
 	client = NULL;
 
@@ -93,10 +122,10 @@ static int client_basic_info(struct http_client *client)
 	char *buff, *tmp;
 	int len, ret = -1;
 
-	if ( NULL == client || NULL == client->mem )
+	if ( NULL == client || NULL == client->inbuff )
 		return ret;
 	
-	data = client->mem;
+	data = client->inbuff;
 	if ( data->inuse_size < 0 )
 		return ret;
 	buff = data->buff;
@@ -186,7 +215,7 @@ static void check_valid(struct head_field *field)
 static __inline__ void http_head_field_init(struct head_field * field, 
 		struct http_client *client,	http_head_field hfd, void * value)
 {
-	field->mem = client->mem;
+	field->mem = client->inbuff;
 	field->hfd = hfd;
 	field->value = value;
 	check_valid(field);
@@ -400,8 +429,8 @@ static int client_head_field(struct http_client *client)
 			case '\x0d':
 				if ( *(head + 1) == '\x0a' ) {
 					client->content = head + 2;
-					client->content_fst_size = client->mem->inuse_size - 
-						(client->content - client->mem->buff);
+					client->content_fst_size = client->inbuff->inuse_size - 
+						(client->content - client->inbuff->buff);
 					ret = 0;
 					return ret;
 				}
@@ -413,11 +442,66 @@ static int client_head_field(struct http_client *client)
 	}
 }
 
+/* 判断http head的可用性 */
+int http_client_head_valid(struct http_client *client)
+{
+	struct pool_entry * mem;
+	
+	if ( NULL == client )
+		return -1;
+	
+	if ( !client->head_valid ) {
+		mem = client->inbuff;
+		/* sizeof ("GET / HTTP/1.1\r\n") = 17 */
+		if ( mem->inuse_size < 17 )
+			return 0;
+		else if ( strstr(mem->buff, "\r\n\r\n" ) ) {
+			client->head_valid = 1;	
+			return 1;
+		}else if ( mem->inuse_size < (HTTP_MAX_HEAD_LEN - 4) )
+			return 0;
+		else
+			return -1;
+	} else 
+		return client->head_valid;
+}
+
+/* 判断是否读取完整个请求 
+ * 在http 解析过才能调用 */
+int http_client_req_entire(struct http_client *client)
+{
+	struct pool_entry * mem;
+	char *cnt_len_str;
+	int	av_cnt_len = 0, cnt_len = 0;
+
+	if ( NULL == client )
+		return -1;
+
+	/* 取出content_length */
+	cnt_len_str = http_search_field(client, Content_Length);
+	if ( NULL == cnt_len_str ) {
+		/* 如果没有取到Content_Length，默认为完整的请求 */
+		return 1;
+	} else {
+		cnt_len = atoi(cnt_len_str);
+		if ( cnt_len == client->content_fst_size )
+			return 1;
+		else {
+			mem = client->inbuff;
+			av_cnt_len = (mem->buff + mem->inuse_size) - client->content;
+			if ( cnt_len == av_cnt_len )
+				return 1;
+			else 
+				return 0;
+		}
+	}
+}
+
 int http_client_parse(struct http_client * client)
 {
 	char *value;
 
-	if ( NULL == client || NULL == client->mem )
+	if ( NULL == client || NULL == client->inbuff )
 		return -1;
 
 	if ( client_basic_info(client) )
@@ -562,4 +646,101 @@ void http_client_put(struct http_client *client)
 		}
 		hc_free++;
 	}	
+}
+
+static void request_test(struct http_client *client)
+{
+	char * value;
+
+	if ( NULL == client )
+		return;
+
+	/* METHOD URI PROTOCOL  HOST COOKIE */
+	printf("method: %s\nURI: %s\nprotocol: %s\n",
+			method_str[client->client_method],
+			client->uri,
+			proto_str[client->client_http_protocol]);
+	if ( (value = http_search_field(client, Host)) )
+		printf("Host: %s\n", value);
+	else
+		printf("Host: not found\n");
+
+	if ( (value = http_search_field(client, Cookie)) )
+		printf("Cookie: %s\n", value);
+	else
+		printf("Cookie: not found\n");
+
+	printf("------------------\n");
+
+}
+
+static int response_test(struct http_client *client, int sockfd)
+{
+	int ret1, ret2;
+	
+	while ( (ret1 = write(sockfd, response_head, strlen(response_head))) < 0)
+		if (errno == EINTR)
+			continue;
+		else if ( ret1 == -1 && (errno == EAGAIN || errno ==  EWOULDBLOCK ))
+			break;
+
+	while ( (ret2 = write(sockfd, index_htm, strlen(index_htm))) < 0)
+		if (errno == EINTR)
+			continue;
+		else if ( ret2 == -1 && (errno == EAGAIN || errno ==  EWOULDBLOCK ))
+			break;
+
+	return ret1+ret2;
+}
+
+/* 
+ * 处理http 请求.
+ * 参数:
+ *	client	struct http_client实例
+ *	*skflag	值结果型参数，函数执行之后socket要执行的动作。
+ * 返回值:
+ *	0		成功
+ *	-1		失败
+ *
+ * 备注: 在http_client_head_valid 成功之后调用。
+ */
+int http_client_request(struct http_client *client, unsigned int *skflag)
+{
+	int ret = -1;
+
+	if ( NULL == client || NULL == skflag)
+		return -1;
+
+	/* 判断是否读取完整个请求 */
+	ret = http_client_req_entire(client);
+	if ( ret == 1 ) {
+		// debug
+		request_test(client);
+
+		/* TODO: 实际这时的sockfd是可写的，socket的buffer为空
+		 * 可以直接调用response函数, 写不成功了在挂epoll */
+		/*
+		ret = response_write_back(client, epfd, sockfd, ev)
+		if (ret < 0)
+			;
+		*/
+		*skflag = HTTP_SOCKFD_OUT;
+	} else {
+		/* TODO 根据不同的方法调用不同函数接受数据 */
+		*skflag = HTTP_SOCKFD_IN;
+	}
+
+	return 0;
+}
+
+int http_client_response(struct http_client *client, unsigned int *skflag)
+{
+	int ret = -1;
+	int sockfd;
+
+	if ( NULL == client || NULL == skflag)
+		return -1;
+
+	sockfd  = client->sockfd;
+	return response_test(client, sockfd);
 }
