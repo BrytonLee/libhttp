@@ -31,22 +31,28 @@ static char *response_head = "HTTP/1.1 200 OK" CRLF
 		CRLF;
 
 static char *index_htm="<html><head><title>Comming soon...</title></head>"
-		"<body><h1>Comming soon...</h1></body></html>";
+		"<body><h1>Comming soon...</h1></body></html>\n";
 
 static int http_client_free(struct http_client *client);
 
-static __inline__ void http_client_reset(struct http_client *client)
+__inline__ void http_client_reset(struct http_client *client)
 {
 	struct pool_entry *entry;
-	
+	int ret = -1;
+
+	client->head_valid = 0;
 	client->uri = client->head = NULL;
 	client->content = NULL;
 	client->content_fst_size = client->inprocess = 0;
-	client->sockfd = -1;
-	client->keepalive = 0;
-	client->head_valid = 0;
+
 	entry = client->inbuff;
 	entry->inuse_size = 0;
+
+	ret = http_client_keepalive(client);
+	if ( !ret ) {
+		client->sockfd = -1;
+		client->keepalive = 0;
+	}
 }
 
 static struct http_client * http_client_new(int sockfd, int mem_size)
@@ -621,6 +627,7 @@ void http_client_put(struct http_client *client)
 	else {
 		node = &client->node;
 		if ( node == hc_head ) {
+			client->keepalive = 0;
 			http_client_reset(client);
 		} else if ( node == hc_tail ) {
 			hc_tail = node->pre;
@@ -630,6 +637,7 @@ void http_client_put(struct http_client *client)
 			node->next = hc_head;
 			hc_head->pre = node;
 			hc_head = node;
+			client->keepalive = 0;
 			http_client_reset(client);
 		} else {
 			pre = node->pre;
@@ -642,10 +650,19 @@ void http_client_put(struct http_client *client)
 			node->next = hc_head;
 			hc_head->pre = node;
 			hc_head = node;
+			client->keepalive = 0;
 			http_client_reset(client);
 		}
 		hc_free++;
 	}	
+}
+
+/* 判断是否保持长链接 */
+__inline int http_client_keepalive(struct http_client *client)
+{
+	if ( NULL == client )
+		return -1;
+	return client->keepalive;
 }
 
 static void request_test(struct http_client *client)
@@ -693,6 +710,17 @@ static int response_test(struct http_client *client, int sockfd)
 	return ret1+ret2;
 }
 
+/* http_client_current_buff 
+ * 当接收的数据超过(或可能超过)当前默认的接收缓冲区(inbuff)时，
+ * 需要判断是活要用额外缓冲区(extbuff)。
+ */
+int http_client_current_buff(struct http_client *client, 
+		struct pool_entry *mem)
+{
+	/* TODO */
+	fprintf(stderr, "call %s\n", __func__);
+}
+
 /* 
  * 处理http 请求.
  * 参数:
@@ -715,7 +743,7 @@ int http_client_request(struct http_client *client, unsigned int *skflag)
 	ret = http_client_req_entire(client);
 	if ( ret == 1 ) {
 		// debug
-		request_test(client);
+		//request_test(client);
 
 		/* TODO: 实际这时的sockfd是可写的，socket的buffer为空
 		 * 可以直接调用response函数, 写不成功了在挂epoll */

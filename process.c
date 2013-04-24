@@ -33,11 +33,13 @@ int request_read(struct http_client *client, int sockfd)
 		if ( mem->inuse_size ) {
 			mem_inuse = mem->inuse_size;
 			ret = http_client_head_valid(client);
-			if ( ret == 1 )
-				/* TODO 读取没有读取到请求完整的 content 
-				 * 这里是出口之一*/
-				return HTTP_SOCKFD_OUT;
-			else if ( ret == 0) 
+			if ( ret == 1 ) {
+				/* 判断有没有读取到请求完整的content */
+				ret = http_client_req_entire(client);
+				if ( !ret ) {
+					total_read = http_client_current_buff(client, mem);
+				} 
+			} else if ( ret == 0) 
 				/* 还没有读取到完整的头域 */
 				total_read += mem_inuse;
 			else
@@ -97,98 +99,17 @@ int request_read(struct http_client *client, int sockfd)
 	}
 }
 
-#if 0
-int data_process(struct http_client *client, int epfd, int sockfd, struct epoll_event *ev)
-{
-#if 0
-	char buff[1024];
-#endif 
-	struct pool_entry *mem;
-	int	mem_insue = 0, redsize;
-	int ret = -1;
-
-	if ( NULL == client || epfd < 0 
-			|| sockfd < 0 || NULL == ev)
-		return ret;
-	
-	mem = client->inbuff;
-	if ( mem->inuse_size ) {
-		mem_insue = mem->inuse_size;
-		ret = http_client_head_valid(client);
-		if ( ret == 1 )
-			/* TODO 读取没有读取到请求完整的 content */
-			;
-		else if ( ret == 0 ) {
-			/* 还没读到完整的头域 */
-			redsize = 0;
-			redsize += mem_inuse;
-			while ( 1 ) {
-				ret = read(sockfd, (mem->buff + redsize),
-						HTTP_MAX_HEAD_LEN - redsize);
-				if ( ret == -1 && errno == EINTR )
-					continue;
-				else if ( ret == -1 && (errno == EAGAIN || errno == EWOULDBLOCK )){
-					break;
-				} 
-				
-				redsize += ret;
-			}
-
-			mem->inuse_size = redsize;
-			*((char *)mem->buff + redsize) = '\0';
-			ret = http_client_head_valid(client);
-			if ( ret == 0 || ret == -1 ) {
-				/* 如果在这个函数中还不能读取到完整的头域的链接全部丢掉 */
-				return -1;
-			} else {
-				if ( (http_client_parse(client)) < 0 )
-					return -1;
-
-				/* 判断是否读取完整个请求 */
-				ret = http_client_req_entire(client);
-				if ( ret == 1 ) {
-					// debug
-					request_test(client);
-
-					/* TODO: 实际这时的sockfd是可写的，socket的buffer为空
-					 * 可以直接调用response函数, 写不成功了再挂epoll */
-					/*
-					ret = response_write_back(client, epfd, sockfd, ev)
-					if (ret < 0)
-						;
-					*/
-					ev->data.fd = sockfd;
-					ev->events = EPOLLOUT;
-					epoll_ctl(epfd, EPOLL_CTL_MOD, sockfd, ev);
-				} else {
-					/* TODO 读取请求的 content */
-				}
-			}
-		}else 
-			/* error */
-			return ret;
-	} else {
-		/* error */
-	}
-
-#if 0
-
-	/* 只是简单的把数据丢掉*/
-	do {
-		while ( (ret = read(sockfd, buff, 1023)) < 0) 
-			if ( errno == EINTR )
-				continue;
-	}while (ret == 0);
-		
-	ev->data.fd = sockfd;
-	ev->events = EPOLLOUT;
-	epoll_ctl(epfd, EPOLL_CTL_MOD, sockfd, ev);
-#endif
-	
-	return 0;
-}
-#endif 
-
+/*
+ * response_write: 回写http响应。 
+ * 参数: 
+ *		client: client实例的指针,
+ *		sockfd: socket 文件描述符。
+ * 返回: 
+ *		-1: 表示出错，
+ *		1(HTTP_SOCKFD_IN): 表示I/O层监听sockfd读事件。
+ *		2(HTTP_SOCKFD_OUT): 表示I/O层监听sockfd写事件。
+ *		4(HTTP_SOCKFD_DEL): 表示I/O层删除sockfd事件监听。
+ */
 int response_write(struct http_client *client, int sockfd)
 {
 	struct pool_entry *entry;
@@ -221,15 +142,10 @@ int response_write(struct http_client *client, int sockfd)
 
 	/* TODO */
 
-	if ( client->keepalive ) {
+	ret = http_client_keepalive(client);
+	if ( ret && ret != -1 ) {
 		/* 准备下一次连接请求 */
-		entry = client->inbuff;
-		entry->inuse_size = 0;
-		client->inprocess = 0;
-		client->uri = client->head = NULL;
-		client->content = NULL;
-		client->content_fst_size = 0;
-
+		http_client_reset(client);
 		return HTTP_SOCKFD_IN;
 	} else {
 		return HTTP_SOCKFD_DEL;

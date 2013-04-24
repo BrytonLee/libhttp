@@ -136,6 +136,17 @@ char * http_search_field(struct http_client *client, http_head_field field);
 struct http_client *http_client_get(int sockfd);
 void http_client_put(struct http_client *client);
 
+__inline__ void http_client_reset(struct http_client *client);
+/* 判断是否保持长链接 */
+__inline int http_client_keepalive(struct http_client *client);
+
+/* http_client_current_buff 
+ * 当接收的数据超过(或可能超过)当前默认的接收缓冲区(inbuff)时，
+ * 需要判断是活要用额外缓冲区(extbuff)。
+ */
+int http_client_current_buff(struct http_client *client, 
+		struct pool_entry *mem);
+
 /* 
  * 处理http 请求.
  * 参数:

@@ -29,6 +29,10 @@ static __inline__ void epoll_set_in(int epfd, int sockfd, struct epoll_event *ev
 	while ( (ret = epoll_ctl(epfd, EPOLL_CTL_MOD, sockfd, ev)) < 0 )
 		if ( ret == -1 && errno == EINTR )
 			continue;
+		else {
+			perror("epoll_ctl error: ");
+			break;
+		}
 }
 
 static __inline__ void epoll_set_out(int epfd, int sockfd, struct epoll_event *ev)
@@ -41,6 +45,10 @@ static __inline__ void epoll_set_out(int epfd, int sockfd, struct epoll_event *e
 	while ( (ret = epoll_ctl(epfd, EPOLL_CTL_MOD, sockfd, ev)) < 0 )
 		if ( ret == -1 && errno == EINTR )
 			continue;
+		else {
+			perror("epoll_ctl error: ");
+			break;
+		}
 }
 
 static __inline__ void epoll_skfd_del(int epfd, int sockfd, struct epoll_event *ev)
@@ -50,6 +58,11 @@ static __inline__ void epoll_skfd_del(int epfd, int sockfd, struct epoll_event *
 	while ( (ret = epoll_ctl(epfd, EPOLL_CTL_DEL, sockfd, ev)) < 0 )
 		if ( errno == EINTR )
 			continue;
+		else {
+			perror("epoll_ctl error: ");
+			break;
+		}
+
 	while ( (close(sockfd) < 0))
 		if ( errno == EINTR )
 			continue;
@@ -273,7 +286,7 @@ static void worker(int sv)
 				memset(&client_addr, '\0', addr_len);
 				while ( 1 ) {
 					sockfd = accept(listenfd, (struct sockaddr *)&client_addr, &addr_len);
-					if ( -1 == sockfd  && errno == EINTR ) 
+					if ( -1 == sockfd && errno == EINTR ) 
 						continue;
 					else if ( -1 == sockfd ) {
 						perror("accept error: ");
@@ -287,6 +300,11 @@ static void worker(int sv)
 				while ( ( ret = epoll_ctl(epfd, EPOLL_CTL_DEL, listenfd, &ev) ) < 0)
 					if ( errno == EINTR )
 						continue;
+					else {
+						fprintf(stderr, "Can not remove listenfd from epoll.\n");
+						break;
+					}
+
 				lstd_on = 0;
 				/* 解锁 */
 				while ( 1 ) {
@@ -296,6 +314,7 @@ static void worker(int sv)
 					break;
 				}
 
+				set_fd_nonblock(sockfd);
 				ev.data.fd = sockfd;
 				ev.events = EPOLLIN;
 				while ( ( ret = epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &ev) ) < 0 )
@@ -304,6 +323,8 @@ static void worker(int sv)
 					else 
 						perror("epoll_ctl error:");
 				total_sockfd++;
+
+				continue;
 			} else
 #endif
 			if ( evs[i].data.fd == sv && evs[i].events & EPOLLIN ) {
@@ -335,7 +356,7 @@ static void worker(int sv)
 				/* ERROR */
 				if ( evs[i].data.fd == sv ) {
 					perror("sv error:");
-					exit(0);
+					exit(-1);
 				} else {
 					fprintf(stderr, "error happened on socket: %d\n",
 							evs[i].data.fd);
@@ -399,7 +420,7 @@ int create_worker(int worker_n, int worker_sv[][2], int closefd)
 				close(worker_sv[j][1]);
 			}
 
-#if 0
+#if 1
 			/* set worker CPU affinity */
 			CPU_ZERO(&mask);
 			CPU_SET(i, &mask);

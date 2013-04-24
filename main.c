@@ -78,7 +78,13 @@ int main(int argc, char ** argv)
 
 	num_cpu = sysconf(_SC_NPROCESSORS_CONF);
 
+/*#define HTTP_DEBUG */
+#ifndef HTTP_DEBUG
 	worker = (num_cpu == -1 ? 4 : num_cpu);
+#else
+	worker = 1;
+#endif
+	
 	int (*worker_sv)[2];
 
 	worker_sv = (int (*)[2])calloc(worker, sizeof(int)*2);
